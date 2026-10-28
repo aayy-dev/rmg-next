@@ -177,4 +177,5 @@
         <item quantity="other">Ces exécutions et leurs journaux seront définitivement supprimés.</item>
     </plurals>
     <string name="history_delete">Supprimer</string>
+    <string name="nav_automate">Automate</string>
 </resources>

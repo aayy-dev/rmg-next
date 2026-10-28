@@ -77,9 +77,10 @@ internal object BootServiceStart {
             NotificationChannel(
                 channel.id,
                 context.getString(channel.nameRes),
-                NotificationManager.IMPORTANCE_LOW,
+                NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
                 channel.descriptionRes?.let { description = context.getString(it) }
+                setSound(null, null)
             },
         )
     }

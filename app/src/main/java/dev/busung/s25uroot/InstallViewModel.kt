@@ -107,6 +107,9 @@ data class InstallUiState(
      * rather than a second screen so the bar, the log, the Stop button and the failure handling stay the ones
      * that are already written, and so a screen that did not start the run can still tell which it is.
      */
+    val countdownEndMillis: Long = 0L,
+    val runStartedAtMillis: Long = 0L,
+    val runTotalLimitMillis: Long = 0L,
     val kind: RunKind = RunKind.Payload,
     /**
      * The plan a universal run resolved, so a retry repeats *that* attempt rather than guessing.
@@ -397,11 +400,12 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 )
                 return@launch
             }
+            val currentMode = AppPreferences.payloadMode(app)
             try {
                 // Offline mode resolves nothing: the cached payload already names its own target, and
                 // a support lookup would put the very network this mode exists without in front of the
                 // first screen the user sees.
-                val profile = if (AppPreferences.payloadMode(app) == PayloadMode.Offline) {
+                val profile = if (currentMode == PayloadMode.Offline || currentMode == PayloadMode.Local) {
                     cachedProfileFor(null)
                 } else {
                     repository.resolveTarget(DeviceSnapshot.current())
@@ -420,7 +424,7 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 // build no source has ported - this phone's own new firmware is the case that found this - is
                 // still a phone it can root. It is asked before the lookup is called a failure, because that
                 // is what the app now treats it as: the primary method, not a fallback of last resort.
-                val offline = AppPreferences.payloadMode(app) == PayloadMode.Offline
+                val offline = currentMode == PayloadMode.Offline || currentMode == PayloadMode.Local
                 val chain = if (offline) null else runCatching { UniversalRootRun.chainFlavor(app) }.getOrNull()
                 mutableState.value = InstallUiState(
                     phase = if (chain != null) InstallPhase.Ready else InstallPhase.Failed,
@@ -541,8 +545,12 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
          * a different way from the one it was promised is the silence the refusal below exists to stop.
          */
         withoutShizuku: Boolean = false,
+        payloadSource: String? = null,
+        localPayloadPath: String? = null,
+        fallbackSource: String? = null,
     ) {
-        install(selectionId, unattended, payloadOffline, preferAttemptedPayload, withoutShizuku)
+        install(selectionId, unattended, payloadOffline, preferAttemptedPayload, withoutShizuku,
+            payloadSource = payloadSource, localPayloadPath = localPayloadPath, fallbackSource = fallbackSource)
         installJob?.join()
     }
 
@@ -1148,6 +1156,9 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
          * kind of silence the prompt exists to end.
          */
         withoutShizuku: Boolean = false,
+        payloadSource: String? = null,
+        localPayloadPath: String? = null,
+        fallbackSource: String? = null,
     ) {
         if (installJob?.isActive == true || mutableState.value.phase == InstallPhase.Installed) {
             AppLog.debug(RUN_LOG_TAG, "Run not started: this screen is already on a run")
@@ -1229,6 +1240,7 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 phase = InstallPhase.Checking,
                 message = app.getString(R.string.status_checking_device),
                 probeOutput = mutableState.value.probeOutput,
+                runStartedAtMillis = System.currentTimeMillis(),
             )
             startHistory()
             // Said before anything is staged, so a sweep in the app's other process cannot take the
@@ -1263,7 +1275,10 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 // Offline mode is what makes a run possible with no network at all, so it resolves
                 // nothing: the cached payload already names its target, and asking the catalog would
                 // be the very thing this mode exists to avoid.
-                val offline = payloadOffline || AppPreferences.payloadMode(app) == PayloadMode.Offline
+                val appMode = AppPreferences.payloadMode(app)
+                val offline = payloadOffline || appMode == PayloadMode.Offline
+                    || appMode == PayloadMode.Local
+                    || payloadSource == "local" || payloadSource == "cached"
                 // Read once and used twice: resolving an attempt hashes the files it verifies, which is
                 // not work to do again a few lines later.
                 val retriedPayload = if (offline && preferAttemptedPayload) {
@@ -1278,7 +1293,12 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                     retriedPayload != null -> retriedPayload.getOrElse { failure ->
                         error(failure.message ?: failure.javaClass.simpleName)
                     }.profile
-                    offline -> cachedProfileFor(selectionId)
+                    offline -> runCatching { cachedProfileFor(selectionId) }.getOrElse {
+                        if (payloadSource == "local" || appMode == PayloadMode.Local) {
+                            runCatching { repository.resolveTarget(DeviceSnapshot.current()) }
+                                .getOrElse { localFallbackProfile(DeviceSnapshot.current()) }
+                        } else throw it
+                    }
                     selectionId == null -> repository.resolveTarget(DeviceSnapshot.current())
                     else -> repository.resolveTarget(selectionId)
                 }
@@ -1383,7 +1403,13 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                     ),
                 )
                 appendLog(app.getString(R.string.log_profile, profile.profileId))
-                if (profile.sourceLabel.isNotEmpty()) {
+                val effectiveLocalPath = localPayloadPath
+                    ?: if (appMode == PayloadMode.Local) LocalPayload.file(app)?.absolutePath else null
+                val useLocalPayload = payloadSource == "local" || appMode == PayloadMode.Local ||
+                    (effectiveLocalPath != null && payloadSource != "online")
+                if (useLocalPayload && effectiveLocalPath != null) {
+                    appendLog(app.getString(R.string.log_payload_source, "local ($effectiveLocalPath)"))
+                } else if (profile.sourceLabel.isNotEmpty()) {
                     appendLog(app.getString(R.string.log_payload_source, profile.sourceLabel))
                 }
                 updateHistoryTarget(profile)
@@ -1392,6 +1418,9 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 // user set should say so in the place a user looks for the reason.
                 // No fresh-session rule any more, so the ceilings are the ones the settings name.
                 activeCeilings = runCeilings(app, freshSession = false)
+                mutableState.value = mutableState.value.copy(
+                    runTotalLimitMillis = activeCeilings.totalMillis,
+                )
                 appendLog(
                     app.getString(
                         R.string.log_run_ceilings,
@@ -1422,7 +1451,23 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 // something that appears after the payload is already staged.
                 awaitBootSettle(AppPreferences.bootSettleSeconds(app))
 
-                val payloads = if (offline) {
+                val payloads = if (useLocalPayload && effectiveLocalPath != null) {
+                    activeStage = RunStage.Download
+                    setPhase(InstallPhase.Downloading, app.getString(R.string.status_staging_local))
+                    try {
+                        stageLocalPayload(profile, effectiveLocalPath)
+                    } catch (localError: Throwable) {
+                        if (fallbackSource == "online" || (payloadSource == "auto" && !offline)) {
+                            appendLog("[*] Local payload failed: ${localError.message}, falling back to online")
+                            setPhase(InstallPhase.Downloading, app.getString(R.string.status_downloading_payload))
+                            repository.download(profile) { appendLog("[*] $it") }.also {
+                                appendLog(app.getString(R.string.log_download_verified))
+                            }
+                        } else {
+                            throw localError
+                        }
+                    }
+                } else if (offline) {
                     activeStage = RunStage.Download
                     setPhase(InstallPhase.Downloading, app.getString(R.string.status_loading_cached))
                     if (retriedPayload != null) {
@@ -1435,15 +1480,39 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                             )
                         }
                     } else {
-                        KnownGoodPayloadStore.load(app, profile.profileId).also { cached ->
-                            appendLog(app.getString(R.string.log_payload_cached, cached.exploit.name))
+                        try {
+                            KnownGoodPayloadStore.load(app, profile.profileId).also { cached ->
+                                appendLog(app.getString(R.string.log_payload_cached, cached.exploit.name))
+                            }
+                        } catch (cacheError: Throwable) {
+                            val fallbackLocal = fallbackSource == "local" || payloadSource == "auto"
+                            val fallbackPath = localPayloadPath ?: LocalPayload.file(app)?.absolutePath
+                            if (fallbackLocal && fallbackPath != null) {
+                                appendLog("[*] Cache failed: ${cacheError.message}, falling back to local payload")
+                                setPhase(InstallPhase.Downloading, app.getString(R.string.status_staging_local))
+                                stageLocalPayload(profile, fallbackPath)
+                            } else {
+                                throw cacheError
+                            }
                         }
                     }
                 } else {
                     activeStage = RunStage.Download
                     setPhase(InstallPhase.Downloading, app.getString(R.string.status_downloading_payload))
-                    repository.download(profile) { appendLog("[*] $it") }.also {
-                        appendLog(app.getString(R.string.log_download_verified))
+                    try {
+                        repository.download(profile) { appendLog("[*] $it") }.also {
+                            appendLog(app.getString(R.string.log_download_verified))
+                        }
+                    } catch (downloadError: Throwable) {
+                        val fallbackLocal = fallbackSource == "local"
+                        val fallbackPath = localPayloadPath ?: LocalPayload.file(app)?.absolutePath
+                        if (fallbackLocal && fallbackPath != null) {
+                            appendLog("[*] Download failed: ${downloadError.message}, falling back to local payload")
+                            setPhase(InstallPhase.Downloading, app.getString(R.string.status_staging_local))
+                            stageLocalPayload(profile, fallbackPath)
+                        } else {
+                            throw downloadError
+                        }
                     }
                 }
 
@@ -1566,6 +1635,7 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 finishHistory(
                     if (loadKernelSu) InstallRunResult.Succeeded else InstallRunResult.RootOnly,
                 )
+                AppPreferences.resetRebootFailureCount(app)
                 // Last, and only for a run that loaded KernelSU: modules take effect when the userspace
                 // is built again, and KernelSU's own soft reboot is the way that walks their lifecycle
                 // in the normal order. After the result is written, because the restart ends everything
@@ -1666,6 +1736,21 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                     AppLog.warn(RUN_LOG_TAG, app.getString(R.string.log_read_only_wall))
                 }
                 finishHistory(InstallRunResult.Failed)
+                if (stage >= RunStage.Exploit && AppPreferences.rebootOnFailure(app) &&
+                    ShizukuController.isRunning()
+                ) {
+                    val maxRetries = AppPreferences.rebootFailureMaxRetries(app)
+                    val count = AppPreferences.incrementRebootFailureCount(app)
+                    if (maxRetries == 0 || count <= maxRetries) {
+                        appendLog("[*] Exploit failed (attempt $count${if (maxRetries > 0) "/$maxRetries" else ""}). Rebooting in 3 seconds…")
+                        kotlinx.coroutines.delay(3000)
+                        runCatching {
+                            ShizukuController.exec(arrayOf("svc", "power", "reboot")).waitFor()
+                        }
+                    } else {
+                        appendLog("[*] Exploit failed. Max retries ($maxRetries) reached, not rebooting.")
+                    }
+                }
             } finally {
                 activeRunShizuku = null
                 activeRunTransport = null
@@ -1879,6 +1964,7 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
             val startedAt = SystemClock.elapsedRealtime()
             var lastProgressAt = startedAt
             var lastRawLog = ""
+            var exploitSettleEnd = 0L
             while (process.isAlive) {
                 val rawLog = readLog()
                 if (rawLog != lastRawLog) {
@@ -1886,6 +1972,30 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                     publishExploitLog(logPrefix, rawLog)
                     lastRawLog = rawLog
                     lastProgressAt = SystemClock.elapsedRealtime()
+                    if (exploitSettleEnd == 0L) {
+                        val match = QUIET_WINDOW_PATTERN.find(rawLog)
+                        if (match != null) {
+                            val waitSec = match.groupValues[1].toLongOrNull() ?: 0L
+                            val upSec = match.groupValues[2].toLongOrNull() ?: 0L
+                            exploitSettleEnd = SystemClock.elapsedRealtime() + (waitSec - upSec) * 1000L
+                        }
+                    }
+                }
+                if (exploitSettleEnd > 0L) {
+                    val left = (exploitSettleEnd - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+                    if (left > 0L) {
+                        val endWall = System.currentTimeMillis() + left
+                        mutableState.value = mutableState.value.copy(
+                            message = BootSettle.formatRemaining(left),
+                            countdownEndMillis = endWall,
+                        )
+                    } else {
+                        mutableState.value = mutableState.value.copy(
+                            message = app.getString(R.string.status_exploit_running),
+                            countdownEndMillis = 0L,
+                        )
+                        exploitSettleEnd = -1L
+                    }
                 }
                 val now = SystemClock.elapsedRealtime()
                 if (!requiresFreshP0Session) {
@@ -2494,10 +2604,44 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
      * A run asked for offline cannot fall back to the network, so the selection has to agree with the
      * cache rather than be resolved against a catalog: there is no catalog to resolve it against.
      */
+    private fun stageLocalPayload(profile: TargetProfile, path: String): VerifiedPayloads {
+        val stagingDir = File(app.filesDir, "staging-local").apply { mkdirs() }
+        val destination = File(stagingDir, "local-exploit.so")
+        LocalPayload.stageFrom(app, path, destination)
+        android.system.Os.chmod(destination.absolutePath, 0b100100100)
+        appendLog(app.getString(R.string.log_payload_local, File(path).name))
+        val daemon = KnownGoodPayloadStore.daemon(app) ?: findStagedDaemon()
+            ?: error(app.getString(R.string.local_payload_no_daemon))
+        return VerifiedPayloads(profile, destination, daemon, PayloadOrigin.Local)
+    }
+
+    private fun findStagedDaemon(): File? {
+        val staged = File("/data/local/tmp/.ksud-stage")
+        if (staged.isFile && staged.length() > 0L) return staged
+        val candidates = File("/data/local/tmp").listFiles { f ->
+            f.isFile && f.name.startsWith("ksud") && f.length() > 0L
+        }
+        return candidates?.maxByOrNull { it.lastModified() }
+    }
+
     private fun cachedProfileFor(selectionId: String?): TargetProfile = KnownGoodPayloadStore.profileFor(
         app,
         selectionId?.let { profileFromSelectionId(it) },
     )
+
+    private fun localFallbackProfile(snapshot: DeviceSnapshot): TargetProfile {
+        val flavor = AppPreferences.kernelsuFlavor(app)
+        val stub = RemoteArtifact(url = "local://exploit.so", size = 1, verifySize = false)
+        return TargetProfile(
+            profileId = "local-${snapshot.device}",
+            displayName = "${snapshot.model} (local)",
+            models = setOf(snapshot.model),
+            kernelVersions = setOf(snapshot.kernelRelease),
+            exploit = stub,
+            kernelSu = stub,
+            flavor = flavor,
+        )
+    }
 
     /**
      * Puts the payload's own manager on the phone when there is none, before the payload runs.
@@ -2725,10 +2869,10 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
      */
     private fun runInFlightElsewhere(): RunHolder? {
         val holder = RunInFlight.holder(app) ?: return null
-        val mine = holder.pid == android.os.Process.myPid() &&
-            holder.entryId != null &&
-            holder.entryId == activeRunId
-        return holder.takeUnless { mine }
+        val sameProcess = holder.pid == android.os.Process.myPid()
+        val mine = sameProcess && holder.entryId != null && holder.entryId == activeRunId
+        val myGate = sameProcess && RunInFlight.isGatePending(holder.entryId)
+        return holder.takeUnless { mine || myGate }
     }
 
     /**
@@ -2908,6 +3052,8 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
         private const val P0_OFFSET_MAX = 0x1f0000L
         private const val P0_OFFSET_MASK = 0xffffL
         private const val SHIZUKU_LOG_PATH = "/data/local/tmp/rmgnext-shizuku-exploit.log"
+        private val QUIET_WINDOW_PATTERN =
+            Regex("""waiting for boot allocator quiet window seconds=(\d+) uptime=(\d+)""")
         private const val SHIZUKU_HELPER_PATH = "/data/local/tmp/rmgnext-helper"
         private const val SHIZUKU_PAYLOAD_PATH = "/data/local/tmp/rmgnext-shizuku-payload"
         private const val SHIZUKU_KSUD_PATH = KSUD_PATH

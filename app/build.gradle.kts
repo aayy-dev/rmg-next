@@ -29,7 +29,7 @@ fun signingProperty(envName: String, propertyName: String): String? =
 // The base version, and the only place either number is written by hand. A release tag is
 // `v$appVersionBase` and both workflows read this literal out of this file, so it has to stay a
 // plain string here rather than being assembled from somewhere else.
-val appVersionBase = "0.13"
+val appVersionBase = "0.14"
 
 // An offset under the version code, not a version of its own: the code is this plus the clock, and the
 // only rule is that it may be raised and never lowered - lowering it would put a new build below an
@@ -71,7 +71,7 @@ val buildLabel = listOfNotNull(
     System.getenv("GITHUB_RUN_NUMBER")?.takeIf { it.isNotBlank() }?.let { "ci.$it" } ?: "local",
     buildCommit,
 ).joinToString(".")
-val appVersionName = "$appVersionBase+$buildLabel"
+val appVersionName = appVersionBase
 
 android {
     namespace = "dev.busung.s25uroot"

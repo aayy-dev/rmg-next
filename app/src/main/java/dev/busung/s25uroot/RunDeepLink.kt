@@ -61,6 +61,12 @@ internal fun runRecordPendingIntent(context: Context, runId: String?): PendingIn
     return PendingIntent.getActivity(context, intent.requestCode(), intent, pendingIntentFlags())
 }
 
+/** The gate's pending intent during settle, before a real run ID exists. */
+internal fun gatePendingPendingIntent(context: Context, bootToken: String): PendingIntent {
+    val intent = liveRunIntent(context, "gate-pending-$bootToken")
+    return PendingIntent.getActivity(context, intent.requestCode(), intent, pendingIntentFlags())
+}
+
 private fun pendingIntentFlags(): Int =
     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 

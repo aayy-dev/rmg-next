@@ -60,4 +60,5 @@
         <item quantity="other">이 실행들과 로그가 영구적으로 삭제됩니다.</item>
     </plurals>
     <string name="history_delete">삭제</string>
+    <string name="nav_automate">Automate</string>
 </resources>

@@ -171,4 +171,5 @@
         <item quantity="other">Các lần chạy này và nhật ký của chúng sẽ bị xóa vĩnh viễn.</item>
     </plurals>
     <string name="history_delete">Xóa</string>
+    <string name="nav_automate">Automate</string>
 </resources>

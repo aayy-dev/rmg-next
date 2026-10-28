@@ -24,6 +24,9 @@ enum class PayloadOrigin {
      * first may be published back to the cache. The log says which one a run used.
      */
     Attempted,
+
+    /** A local payload the user supplied by path, through an intent or the boot settings. */
+    Local,
 }
 
 /** What a run is allowed to use as its payload. */
@@ -39,6 +42,9 @@ enum class PayloadMode {
      * boot-time run has to use, because at boot there is no one to wait for a download.
      */
     Offline,
+
+    /** Use the locally imported payload instead of downloading or using the cache. */
+    Local,
 }
 
 /**

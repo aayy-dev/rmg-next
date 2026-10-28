@@ -19,6 +19,17 @@ enum class AccentColor(val storedValue: String) {
     }
 }
 
+enum class BootPayloadSource(val storedValue: String) {
+    Cached("cached"),
+    Local("local"),
+    Auto("auto");
+
+    companion object {
+        fun fromStoredValue(value: String?): BootPayloadSource =
+            entries.firstOrNull { it.storedValue == value } ?: Cached
+    }
+}
+
 enum class AppThemeMode(val storedValue: String) {
     System("system"),
     Light("light"),
@@ -111,6 +122,11 @@ object AppPreferences {
     private const val PAYLOAD_MODE = "payload_mode"
     private const val BATTERY_PROMPT_SHOWN = "battery_prompt_shown"
     private const val LOCAL_PAYLOAD_NAME = "local_payload_name"
+    private const val BOOT_PAYLOAD_SOURCE = "boot_payload_source"
+    private const val BOOT_LOCAL_PAYLOAD_PATH = "boot_local_payload_path"
+    private const val REBOOT_ON_FAILURE = "reboot_on_failure"
+    private const val REBOOT_FAILURE_MAX_RETRIES = "reboot_failure_max_retries"
+    private const val REBOOT_FAILURE_COUNT = "reboot_failure_count"
 
     // When this app performed the two steps of the system-uid flow. Ordering only: each step's own tool
     // is what says whether it is done, and these are read to answer "and has it rebooted since?".
@@ -948,6 +964,51 @@ object AppPreferences {
         val editor = prefs(context).edit()
         if (name == null) editor.remove(LOCAL_PAYLOAD_NAME) else editor.putString(LOCAL_PAYLOAD_NAME, name)
         editor.apply()
+    }
+
+    fun bootPayloadSource(context: Context): BootPayloadSource =
+        BootPayloadSource.fromStoredValue(prefs(context).getString(BOOT_PAYLOAD_SOURCE, null))
+
+    fun setBootPayloadSource(context: Context, source: BootPayloadSource) {
+        prefs(context).edit()
+            .putString(BOOT_PAYLOAD_SOURCE, source.storedValue)
+            .apply()
+    }
+
+    fun bootLocalPayloadPath(context: Context): String? =
+        prefs(context).getString(BOOT_LOCAL_PAYLOAD_PATH, null)
+
+    fun setBootLocalPayloadPath(context: Context, path: String?) {
+        val editor = prefs(context).edit()
+        if (path == null) editor.remove(BOOT_LOCAL_PAYLOAD_PATH) else editor.putString(BOOT_LOCAL_PAYLOAD_PATH, path)
+        editor.apply()
+    }
+
+    fun rebootOnFailure(context: Context): Boolean =
+        prefs(context).getBoolean(REBOOT_ON_FAILURE, false)
+
+    fun setRebootOnFailure(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(REBOOT_ON_FAILURE, enabled).apply()
+    }
+
+    fun rebootFailureMaxRetries(context: Context): Int =
+        prefs(context).getInt(REBOOT_FAILURE_MAX_RETRIES, 3)
+
+    fun setRebootFailureMaxRetries(context: Context, count: Int) {
+        prefs(context).edit().putInt(REBOOT_FAILURE_MAX_RETRIES, count).apply()
+    }
+
+    fun rebootFailureCount(context: Context): Int =
+        prefs(context).getInt(REBOOT_FAILURE_COUNT, 0)
+
+    fun incrementRebootFailureCount(context: Context): Int {
+        val next = rebootFailureCount(context) + 1
+        prefs(context).edit().putInt(REBOOT_FAILURE_COUNT, next).apply()
+        return next
+    }
+
+    fun resetRebootFailureCount(context: Context) {
+        prefs(context).edit().remove(REBOOT_FAILURE_COUNT).apply()
     }
 
     /** When this app last injected the certificate, or null when it never did or has no record. */

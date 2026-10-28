@@ -81,6 +81,79 @@ object LocalPayload {
         return destination
     }
 
+    /**
+     * Stages an arbitrary `.so` from a device path, for intent-based and boot-time runs that name
+     * a payload by path rather than through the picker.
+     *
+     * Tries direct file access first. When that fails with a permission error (common for
+     * /sdcard/ under scoped storage, or /data/local/tmp/ under SELinux), falls back to reading
+     * via Shizuku's shell-privileged process.
+     */
+    fun stageFrom(context: Context, path: String, destination: File): File {
+        val source = File(path)
+        val temporary = File(destination.parentFile, "${destination.name}$PART_SUFFIX")
+        try {
+            val directAccess = source.canRead()
+            if (directAccess) {
+                require(source.isFile && source.length() > 0L) {
+                    context.getString(R.string.local_payload_missing)
+                }
+                require(source.length() <= MAX_BYTES) {
+                    context.getString(R.string.local_payload_too_large)
+                }
+                require(startsWithElfMagic(source)) {
+                    context.getString(R.string.local_payload_not_elf)
+                }
+                source.inputStream().use { input ->
+                    FileOutputStream(temporary).use { output ->
+                        input.copyTo(output, DEFAULT_BUFFER_SIZE)
+                        output.fd.sync()
+                    }
+                }
+            } else {
+                copyViaShell(context, path, temporary)
+            }
+            require(temporary.renameToReplacing(destination)) {
+                context.getString(R.string.repo_finalize_failed, source.name)
+            }
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+        return destination
+    }
+
+    private fun copyViaShell(context: Context, path: String, temporary: File) {
+        val process = ShizukuController.exec(arrayOf("cat", path))
+        try {
+            process.inputStream.use { input ->
+                FileOutputStream(temporary).use { output ->
+                    var total = 0L
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        require(isWithinLimit(total)) {
+                            context.getString(R.string.local_payload_too_large)
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            val exitCode = process.waitFor()
+            require(exitCode == 0 && temporary.length() > 0L) {
+                context.getString(R.string.local_payload_missing)
+            }
+        } finally {
+            if (process.isAlive) process.destroy()
+        }
+        require(startsWithElfMagic(temporary)) {
+            context.getString(R.string.local_payload_not_elf)
+        }
+    }
+
     fun clear(context: Context) {
         val directory = directory(context)
         File(directory, FILE_NAME).delete()

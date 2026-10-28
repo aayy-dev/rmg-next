@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <!--
       Held by the boot gate while it waits out the settle floor and runs the install, so the device
       cannot drop back into suspend mid-run. Missing this is a hard crash, not a degraded run.
@@ -176,7 +178,12 @@
             android:noHistory="true" />
         <activity
             android:name=".InstallActivity"
-            android:exported="false" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.aayy.rmg.action.INSTALL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".MainActivity"
             android:exported="true">

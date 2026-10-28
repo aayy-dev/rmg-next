@@ -59,6 +59,16 @@ internal sealed interface PayloadChoice {
     /** Whether this row is what someone typed. */
     fun matchesQuery(query: String): Boolean
 
+    /** The locally imported payload, independent of any source or catalog. */
+    data class Local(val name: String, override val flavor: KernelSuFlavor) : PayloadChoice {
+        override val key: String get() = "local:imported"
+        override fun matchesQuery(query: String): Boolean {
+            val needle = query.trim()
+            if (needle.isEmpty()) return true
+            return listOf("local", "imported", name).any { it.contains(needle, ignoreCase = true) }
+        }
+    }
+
     /** One entry a source published, for one device the sheet's original and still its usual row. */
     data class Device(val profile: TargetProfile) : PayloadChoice {
         override val key: String get() = profile.selectionId

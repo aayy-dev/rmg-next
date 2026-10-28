@@ -60,6 +60,10 @@ class AutoRootService : Service() {
     @Volatile
     private var retryArmedThisBoot = false
 
+    /** The boot token this gate is running for, set once the gate starts. */
+    @Volatile
+    private var gateBootToken: String? = null
+
     override fun onCreate() {
         super.onCreate()
         BootServiceStart.ensureChannel(this, CHANNEL)
@@ -124,6 +128,7 @@ class AutoRootService : Service() {
             stopWithoutResult()
             return
         }
+        gateBootToken = initialBootToken
         // The universal root's armed retry, asked before anything about the payload flow is. It is a different
         // flow with different settings - no cached payload, no Shizuku promise, no root-on-boot switch - so the
         // questions below are not its questions, and a phone that has never installed a payload would stand down
@@ -221,6 +226,7 @@ class AutoRootService : Service() {
             return
         }
 
+        RunInFlight.beginGate(this, initialBootToken)
         val wakeLock = acquireGateWakeLock()
         try {
             withTimeout(GATE_LIMIT_MILLIS) {
@@ -245,7 +251,8 @@ class AutoRootService : Service() {
                 // it is now. It is reported rather than silent, because by here the attempt has been claimed -
                 // so this is a boot that got no automatic install, and the notification is the only account
                 // of why. The run it yields to is the user's own and has its own notification.
-                if (RunInFlight.holder(this@AutoRootService) != null) {
+                val postSettleHolder = RunInFlight.holder(this@AutoRootService)
+                if (postSettleHolder != null && !RunInFlight.isGatePending(postSettleHolder.entryId)) {
                     AppLog.warn(AppLogTags.BOOT, "Root on boot stood down after the wait: a run was in flight")
                     finish(getString(R.string.autoroot_run_in_flight))
                     return@withTimeout
@@ -331,8 +338,9 @@ class AutoRootService : Service() {
             onWaiting = { left ->
                 notifyOngoing(
                     message = getString(R.string.status_boot_settle, BootSettle.formatRemaining(left)),
-                    chip = R.string.autoroot_chip_booting,
+                    chip = BootSettle.formatRemaining(left),
                     fraction = waitedFraction(left, windowMillis),
+                    countdownEndMillis = System.currentTimeMillis() + left,
                 )
             },
         )
@@ -697,13 +705,17 @@ class AutoRootService : Service() {
             model.state.collect { state ->
                 if (!state.busy) return@collect
                 val line = state.log.lineSequence().lastOrNull()?.take(MAX_NOTIFICATION_DETAIL)
+                val chipText = if (state.countdownEndMillis > 0L) {
+                    val left = (state.countdownEndMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+                    BootSettle.formatRemaining(left)
+                } else {
+                    getString(RunNotification.chipLabel(state.phase))
+                }
                 notifyOngoing(
                     message = state.message.ifBlank { line.orEmpty() },
-                    // The phase's own word and the card's own fraction, because an unattended run is the one
-                    // nobody can open the app for: its notification is all of it there is to look at, and
-                    // [installProgress] being the bar the screen draws is what keeps the two the same story.
-                    chip = RunNotification.chipLabel(state.phase),
+                    chip = chipText,
                     fraction = installProgress(state.phase, state.failure?.stage),
+                    countdownEndMillis = state.countdownEndMillis,
                 )
             }
         }
@@ -711,9 +723,25 @@ class AutoRootService : Service() {
             message = getString(R.string.autoroot_starting),
             chip = R.string.run_chip_starting,
         )
+        val bootPayload = AppPreferences.bootPayloadSource(this)
+        val bootLocalPath = when (bootPayload) {
+            BootPayloadSource.Local -> AppPreferences.bootLocalPayloadPath(this)
+                ?: LocalPayload.file(this)?.absolutePath
+            BootPayloadSource.Auto -> AppPreferences.bootLocalPayloadPath(this)
+                ?: LocalPayload.file(this)?.absolutePath
+            else -> null
+        }
+        val bootPayloadSource = when (bootPayload) {
+            BootPayloadSource.Local -> "local"
+            BootPayloadSource.Auto -> "auto"
+            else -> null
+        }
         model.runToCompletion(
             unattended = true,
-            payloadOffline = true,
+            payloadOffline = bootPayload == BootPayloadSource.Cached,
+            payloadSource = bootPayloadSource,
+            localPayloadPath = bootLocalPath,
+            fallbackSource = if (bootPayload == BootPayloadSource.Auto) "local" else null,
             // A retry runs the payload the failed attempt was for, from the files that attempt left on
             // the device. Root on boot has no attempt to honour by definition - it is not repeating
             // anything - so it keeps resolving from the cache.
@@ -771,9 +799,18 @@ class AutoRootService : Service() {
      * way is named by its phase - the same word, from the same place, the run's own notification uses.
      */
     private fun notifyOngoing(message: String, chip: Int, fraction: Float? = null) {
+        notifyOngoing(message, getString(chip), fraction)
+    }
+
+    private fun notifyOngoing(
+        message: String,
+        chip: String,
+        fraction: Float? = null,
+        countdownEndMillis: Long = 0L,
+    ) {
         if (stopping) return
         val builder = buildNotification(message, ongoing = true)
-        RunNotification.live(builder, getString(chip), fraction)
+        RunNotification.live(builder, chip, fraction, countdownEndMillis)
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, builder.build())
     }
 
@@ -860,7 +897,7 @@ class AutoRootService : Service() {
         answers: ShizukuRefusalActions? = null,
     ) = NotificationCompat
         .Builder(this, CHANNEL.id)
-        .setSmallIcon(android.R.drawable.stat_sys_warning)
+        .setSmallIcon(if (ongoing) android.R.drawable.stat_sys_download else android.R.drawable.stat_notify_error)
         .setContentTitle(
             getString(
                 if (retryArmedThisBoot) R.string.autoroot_retry_title
@@ -869,6 +906,7 @@ class AutoRootService : Service() {
         )
         .setContentText(message)
         .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+        .setCategory(NotificationCompat.CATEGORY_PROGRESS)
         // The run this notification is about, once there is one. It goes to the run screen, which is the
         // screen that knows what it can do with the name: this process is not the UI process, so the run is
         // shown there by following the record it is writing, and a tap that arrives after the run has ended
@@ -877,8 +915,16 @@ class AutoRootService : Service() {
         .setContentIntent(
             viewModel?.activeRunId
                 ?.let { liveRunPendingIntent(this, it) }
+                ?: gateBootToken?.let { gatePendingPendingIntent(this, it) }
                 ?: runRecordPendingIntent(this, null),
         )
+        .apply {
+            if (viewModel == null) {
+                gateBootToken?.let {
+                    setFullScreenIntent(gatePendingPendingIntent(this@AutoRootService, it), true)
+                }
+            }
+        }
         .setOnlyAlertOnce(true)
         .setOngoing(ongoing)
         .setAutoCancel(!ongoing)
@@ -962,7 +1008,7 @@ class AutoRootService : Service() {
          * [BootServiceStart.ensureChannel] for why the second case can make it itself.
          */
         private val CHANNEL = BootServiceStart.Channel(
-            id = "auto_root",
+            id = "auto_root_live",
             nameRes = R.string.autoroot_channel_name,
             descriptionRes = R.string.autoroot_channel_description,
         )

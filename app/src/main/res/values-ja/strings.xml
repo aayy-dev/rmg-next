@@ -59,4 +59,5 @@
         <item quantity="other">これらの実行とログは完全に削除されます。</item>
     </plurals>
     <string name="history_delete">削除</string>
+    <string name="nav_automate">Automate</string>
 </resources>

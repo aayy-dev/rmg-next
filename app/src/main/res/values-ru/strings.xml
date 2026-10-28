@@ -180,4 +180,5 @@
         <item quantity="other">Эти запуски и их журналы будут удалены навсегда.</item>
     </plurals>
     <string name="history_delete">Удалить</string>
+    <string name="nav_automate">Automate</string>
 </resources>

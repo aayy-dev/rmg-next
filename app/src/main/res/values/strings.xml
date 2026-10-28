@@ -5,6 +5,7 @@
     <string name="nav_history">History</string>
     <string name="nav_logs">Logs</string>
     <string name="nav_settings">Settings</string>
+    <string name="nav_automate">Automate</string>
     <string name="install_confirm_title">Ready to start?</string>
     <string name="install_confirm_body">The app checks this phone, downloads the exploit and KernelSU from GitHub, then runs them.</string>
     <string name="action_confirm">Confirm</string>
@@ -136,8 +137,10 @@
     <string name="settings_payload_mode">Payload mode</string>
     <string name="settings_payload_mode_online">Online</string>
     <string name="settings_payload_mode_offline">Saved</string>
+    <string name="settings_payload_mode_local">Local</string>
     <string name="settings_payload_mode_summary_online">Downloads the payload for each run. Needs internet.</string>
     <string name="settings_payload_mode_summary_offline">Uses the saved payload. No internet needed.</string>
+    <string name="settings_payload_mode_summary_local">Uses the imported local payload. No internet needed.</string>
     <string name="action_stop_run">Stop</string>
     <!--
         A run that was not started because the device is already on one. The three lines are the card, the
@@ -1280,4 +1283,44 @@ Hold Power and Volume Down together for 7 seconds to Reboot it from there.</stri
         <item quantity="one">This run and its log will be permanently removed.</item>
         <item quantity="other">These runs and their logs will be permanently removed.</item>
     </plurals>
+
+    <!-- Automate page -->
+    <string name="automate_title">Automation</string>
+    <string name="automate_subtitle">Launch the exploit remotely via ADB or automation apps like Tasker.</string>
+    <string name="automate_adb_title">ADB Command</string>
+    <string name="automate_tasker_title">Tasker Setup</string>
+    <string name="automate_extras_title">Intent Extras Reference</string>
+    <string name="automate_run_type">Run Type</string>
+    <string name="automate_payload_source">Payload Source</string>
+    <string name="automate_local_path">Local Payload Path</string>
+    <string name="automate_fallback">Fallback</string>
+    <string name="automate_copy">Copy Command</string>
+    <string name="automate_copied">Copied</string>
+    <string name="automate_test">Test Launch</string>
+    <string name="automate_payload_run">Payload</string>
+    <string name="automate_universal_run">Universal</string>
+    <string name="automate_source_online">Online</string>
+    <string name="automate_source_local">Local</string>
+    <string name="automate_source_auto">Auto</string>
+    <string name="automate_fallback_none">None</string>
+
+    <!-- Local payload staging -->
+    <string name="status_staging_local">Staging local payload…</string>
+    <string name="log_payload_local">[*] Staging local payload: %1$s</string>
+    <string name="local_payload_no_daemon">No cached KernelSU daemon available. Run once online first to cache one.</string>
+
+    <!-- Boot payload source -->
+    <string name="settings_boot_payload_source">Boot payload source</string>
+    <string name="settings_boot_payload_cached">Cached</string>
+    <string name="settings_boot_payload_local">Local</string>
+    <string name="settings_boot_payload_auto">Auto</string>
+    <string name="settings_boot_payload_summary_cached">Uses the saved online payload at boot.</string>
+    <string name="settings_boot_payload_summary_local">Uses the imported local payload at boot.</string>
+    <string name="settings_boot_payload_summary_auto">Tries cached first, then falls back to local.</string>
+
+    <!-- Reboot on failure -->
+    <string name="settings_reboot_on_failure">Reboot on failure</string>
+    <string name="settings_reboot_on_failure_summary">Reboot the device when the exploit fails. Retries root on next boot.</string>
+    <string name="settings_reboot_failure_max_retries">Max failure reboots</string>
+    <string name="settings_reboot_failure_max_retries_summary">How many times to reboot and retry after a failed exploit. 0 for unlimited.</string>
 </resources>

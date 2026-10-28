@@ -334,7 +334,9 @@ internal object AutoRootSupport {
             // installation first" about a retry it had asked for by hand - while the payload it was
             // testing sat on the device, recorded as the attempt that failed.
             hasVerifiedInstall = hasVerifiedInstall(context) ||
-                (retryArmed && AttemptedPayloadStore.hasRecord(context)),
+                (retryArmed && AttemptedPayloadStore.hasRecord(context)) ||
+                (AppPreferences.bootPayloadSource(context) != BootPayloadSource.Cached &&
+                    LocalPayload.file(context) != null),
             verifiedBootToken = verifiedBootToken(context),
             attemptedBootToken = bootToken.takeIf { hasAttemptedBoot(context, bootToken) },
             bootToken = bootToken,

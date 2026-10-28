@@ -185,4 +185,5 @@
         <item quantity="one">Dieser Durchlauf und sein Protokoll werden unwiderruflich gelöscht.</item>
         <item quantity="other">Diese Durchläufe und ihre Protokolle werden unwiderruflich gelöscht.</item>
     </plurals>
+    <string name="nav_automate">Automate</string>
 </resources>

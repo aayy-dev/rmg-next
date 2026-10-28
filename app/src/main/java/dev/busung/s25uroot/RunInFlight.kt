@@ -109,6 +109,29 @@ internal object RunInFlight {
     }
 
     /**
+     * Records that a boot gate is about to run, before the settle wait.
+     *
+     * The entry ID is synthetic (`gate-pending-<bootToken>`) so the UI can recognise a gate that
+     * has not started its real run yet. Once the actual run starts, [begin] overwrites this with
+     * the real entry ID, and the UI transitions from the countdown to the live run view.
+     */
+    fun beginGate(context: Context, bootToken: String?): Boolean {
+        val token = bootToken?.trim()?.takeIf(String::isNotBlank) ?: return false
+        return preferences(context).edit()
+            .putString(TOKEN, token)
+            .putString(PID, android.os.Process.myPid().toString())
+            .putString(ENTRY, "gate-pending-$token")
+            .putString(START_TICKS, startTicksOf(android.os.Process.myPid()))
+            .commit()
+    }
+
+    /**
+     * Whether the given entry ID is a gate-pending placeholder.
+     */
+    fun isGatePending(entryId: String?): Boolean =
+        entryId != null && entryId.startsWith("gate-pending-")
+
+    /**
      * Clears the record, but only where it names this process.
      *
      * Compared before clearing because two processes can both be finishing: a blind clear would erase
@@ -173,6 +196,7 @@ internal object RunInFlight {
      * Not cached: two processes writing this record must see each other's writes, and a cached
      * `SharedPreferences` in one process would answer with the value it read at its own start.
      */
+    @Suppress("DEPRECATION")
     private fun preferences(context: Context) =
-        context.getSharedPreferences(STATE, Context.MODE_PRIVATE)
+        context.getSharedPreferences(STATE, Context.MODE_MULTI_PROCESS)
 }

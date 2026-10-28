@@ -99,6 +99,8 @@ import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Difference
@@ -601,7 +603,7 @@ class MainActivity : ComponentActivity() {
                         AppPreferences.setShizukuBootMode(this, enabled)
                         shizukuBootMode = enabled
                     },
-                    openInstaller = ::openInstaller,
+                    openInstaller = { selectionId, payloadSource -> openInstaller(selectionId, payloadSource) },
                     openUniversalRun = ::openUniversalRun,
                     settingsTarget = settingsTarget,
                     onSettingsTargetHandled = { settingsTarget = null },
@@ -722,11 +724,20 @@ class MainActivity : ComponentActivity() {
         callingPackage
     }
 
-    private fun openInstaller(selectionId: String? = null) {
+    private fun openInstaller(selectionId: String? = null, payloadSource: String? = null) {
         val installer = Intent(this, InstallActivity::class.java)
             .putExtra(InstallActivity.EXTRA_INSTALL_REQUEST_ID, UUID.randomUUID().toString())
         if (selectionId != null) {
             installer.putExtra(InstallActivity.EXTRA_PROFILE_ID, selectionId)
+        }
+        if (payloadSource != null) {
+            installer.putExtra(InstallActivity.EXTRA_PAYLOAD_SOURCE, payloadSource)
+        }
+        if (payloadSource == "local") {
+            val localPath = LocalPayload.file(this)?.absolutePath
+            if (localPath != null) {
+                installer.putExtra(InstallActivity.EXTRA_LOCAL_PAYLOAD_PATH, localPath)
+            }
         }
         startActivity(installer)
     }
@@ -817,6 +828,7 @@ private enum class AppPage(@StringRes val label: Int, val icon: ImageVector) {
     Overview(R.string.nav_overview, Icons.Rounded.Home),
     History(R.string.nav_history, Icons.Rounded.History),
     Logs(R.string.nav_logs, Icons.Rounded.Terminal),
+    Automate(R.string.nav_automate, Icons.Rounded.Code),
     Settings(R.string.nav_settings, Icons.Rounded.Settings),
 }
 
@@ -921,7 +933,7 @@ private fun RootApp(
     onPayloadFlavorResolved: (KernelSuFlavor) -> Unit,
     requestNotificationPermission: () -> Unit,
     onRequestBatteryExemption: () -> Unit,
-    openInstaller: (String?) -> Unit,
+    openInstaller: (String?, String?) -> Unit,
     /**
      * Starts the universal root with one row's two answers.
      *
@@ -1139,7 +1151,7 @@ private fun RootApp(
         // plan describes that one. Reading the catalog here would describe a run the mode exists to
         // avoid, and an offline plan that named some other target's source would be a plan about
         // another app's run.
-        val resolved = if (payloadMode == PayloadMode.Offline) {
+        val resolved = if (payloadMode == PayloadMode.Offline || payloadMode == PayloadMode.Local) {
             cachedPayload?.profile()
         } else {
             targetCatalog.profiles.resolveFor(device)
@@ -1161,7 +1173,7 @@ private fun RootApp(
             unresolvedNote = if (resolved != null) {
                 null
             } else when {
-                payloadMode == PayloadMode.Offline ->
+                payloadMode == PayloadMode.Offline || payloadMode == PayloadMode.Local ->
                     context.getString(R.string.run_plan_offline_no_cache)
                 targetCatalog.loading -> context.getString(R.string.run_plan_catalog_loading)
                 targetCatalog.error != null -> targetCatalog.error
@@ -1275,17 +1287,14 @@ private fun RootApp(
                         }
                         if (compatibilityWarning == null) confirming = choice
                     }
-                    is PayloadChoice.Universal -> {
-                        // Nothing is written here, and that is the one thing this branch does have to
-                        // get right: which KernelSU this run loads is decided by the payload it
-                        // *resolves*, so the run writes the flavour itself, once, after resolving -
-                        // the single writer this project allows. A flavour written from a row would be
-                        // a second writer, and it would be writing the one that was *asked* for.
+                    is PayloadChoice.Local -> {
                         selectedProfile = null
                         compatibilityWarning = null
-                        // The same confirmation a payload run gets, and it is not a formality here either:
-                        // this is the last screen before the kernel is patched, and the two facts it states -
-                        // which KernelSU and which build of it - are the two the row was picked by.
+                        confirming = choice
+                    }
+                    is PayloadChoice.Universal -> {
+                        selectedProfile = null
+                        compatibilityWarning = null
                         confirming = choice
                     }
                 }
@@ -1412,6 +1421,9 @@ private fun RootApp(
     // start without being confirmed.
     confirming?.let { pending ->
         val universal = pending as? PayloadChoice.Universal
+        var confirmPayloadSource by remember { mutableStateOf("online") }
+        val localPayloadName = remember { LocalPayload.displayName(context) }
+        val hasCachedPayload = cachedPayload != null
         AlertDialog(
             onDismissRequest = { confirming = null },
             icon = { Icon(Icons.Rounded.Security, contentDescription = null) },
@@ -1424,22 +1436,13 @@ private fun RootApp(
                     Text(
                         when (pending) {
                             is PayloadChoice.Device -> stringResource(R.string.install_confirm_body)
+                            is PayloadChoice.Local -> stringResource(R.string.install_confirm_body)
                             is PayloadChoice.Universal -> stringResource(
                                 R.string.universal_confirm_body,
                                 UniversalRootRun.EXPLOIT_NAME,
                             )
                         },
                     )
-                    // Nothing is said about the manager for a payload run, which is the sentence that used to
-                    // be the whole of this body. The run installs the flavour's manager itself when the phone
-                    // has none, so that dialog could only state it twice: once as an offer, which is the run's
-                    // step and not the dialog's, and once as a reading, which the home card already carries
-                    // for the payload the person just picked.
-                    //
-                    // The chain's run is the one case where which manager gets installed is not already
-                    // somewhere on the screen the confirmation was opened from, because its rows are a
-                    // flavour and a tier rather than a profile: the flavour is the manager, and the tier is
-                    // the module that kernel has to accept.
                     if (universal != null) {
                         RunPlanRow(
                             label = stringResource(R.string.universal_confirm_kernelsu),
@@ -1457,12 +1460,35 @@ private fun RootApp(
                             ),
                         )
                     }
+                    if (pending is PayloadChoice.Device) {
+                        HorizontalDivider()
+                        Text(
+                            stringResource(R.string.settings_boot_payload_source),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = confirmPayloadSource == "online",
+                                onClick = { confirmPayloadSource = "online" },
+                                label = { Text(stringResource(R.string.settings_payload_mode_online)) },
+                            )
+                            FilterChip(
+                                selected = confirmPayloadSource == "cached",
+                                onClick = { confirmPayloadSource = "cached" },
+                                label = { Text(stringResource(R.string.settings_boot_payload_cached)) },
+                                enabled = hasCachedPayload,
+                            )
+                            FilterChip(
+                                selected = confirmPayloadSource == "local",
+                                onClick = { confirmPayloadSource = "local" },
+                                label = { Text(localPayloadName ?: stringResource(R.string.settings_boot_payload_local)) },
+                                enabled = localPayloadName != null,
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
-                // Confirm is the recommended answer and Cancel is the quiet one. Confirm is not
-                // destructive even though a run replaces the kernel: what this dialog asks is whether to
-                // start, and everything a run can report comes after it.
                 AppDialogActions(
                     listOf(
                         AppAction(R.string.action_confirm, AppActionRole.Priority) {
@@ -1470,8 +1496,12 @@ private fun RootApp(
                             confirming = null
                             when (pending) {
                                 is PayloadChoice.Device -> {
-                                    openInstaller(pending.profile.selectionId)
+                                    val source = confirmPayloadSource.takeIf { it != "online" }
+                                    openInstaller(pending.profile.selectionId, source)
                                     selectedProfile = null
+                                }
+                                is PayloadChoice.Local -> {
+                                    openInstaller(null, "local")
                                 }
                                 is PayloadChoice.Universal ->
                                     openUniversalRun(pending.flavor, pending.tier)
@@ -1607,6 +1637,7 @@ private fun RootApp(
                             onReloadHistory = installViewModel::reloadHistory,
                         )
                         AppPage.Logs -> LogsPage(padding)
+                        AppPage.Automate -> AutomatePage(padding)
                         AppPage.Settings -> SettingsPage(
                             padding = padding,
                             device = device,
@@ -4177,74 +4208,117 @@ private fun HistoryDetail(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val scope = rememberCoroutineScope()
+    val logScrollState = rememberScrollState()
     val exportLogLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         result.data?.data?.let { uri -> HistoryLogExporter.saveLog(context, uri, entry) }
     }
-    PageList(
-        padding = padding,
-        listState = rememberPageListState(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            Row(
-                modifier = Modifier.padding(top = 12.dp, bottom = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                IconButton(onClick = {
-                    clickHaptic(view)
-                    onBack()
-                }) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                }
-                Text(
-                    stringResource(R.string.history_detail_title),
-                    style = MaterialTheme.typography.headlineLarge,
-                    modifier = Modifier.weight(1f),
+        Row(
+            modifier = Modifier.padding(top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            IconButton(onClick = {
+                clickHaptic(view)
+                onBack()
+            }) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = stringResource(R.string.action_back))
+            }
+            Text(
+                stringResource(R.string.history_detail_title),
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = {
+                clickHaptic(view)
+                exportLogLauncher.launch(
+                    Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TITLE, HistoryLogExporter.entryFileName(entry))
+                    },
                 )
-                IconButton(onClick = {
-                    clickHaptic(view)
-                    copyLogToClipboard(context, entry.log)
-                }) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = stringResource(R.string.action_copy_log))
-                }
-                IconButton(onClick = {
-                    clickHaptic(view)
-                    exportLogLauncher.launch(
-                        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TITLE, HistoryLogExporter.entryFileName(entry))
-                        },
-                    )
-                }) {
-                    Icon(Icons.Rounded.Save, contentDescription = stringResource(R.string.export_log))
-                }
+            }) {
+                Icon(Icons.Rounded.Save, contentDescription = stringResource(R.string.export_log))
             }
         }
-        item { HistoryResultCard(entry) }
-        item {
-            // The same pass the run screen makes, so a log does not change shape when it stops being a run and
-            // becomes a record. The stored text stays raw, and so does what the copy button above it copies.
-            val display = remember(entry.log) { formatLogForDisplay(entry.log) }
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.large,
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                ),
-            ) {
+        HistoryResultCard(entry)
+        val display = remember(entry.log) { formatLogForDisplay(entry.log) }
+        Card(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            shape = MaterialTheme.shapes.large,
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            ),
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
                 Text(
                     text = display ?: stringResource(R.string.history_log_empty),
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(logScrollState)
+                        .padding(14.dp),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
+                Column(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LogFloatingButton(
+                        icon = Icons.Rounded.KeyboardArrowUp,
+                        onClick = {
+                            clickHaptic(view)
+                            scope.launch { logScrollState.animateScrollTo(0) }
+                        },
+                    )
+                    LogFloatingButton(
+                        icon = Icons.Rounded.ContentCopy,
+                        onClick = {
+                            clickHaptic(view)
+                            copyLogToClipboard(context, entry.log)
+                        },
+                    )
+                }
+                LogFloatingButton(
+                    icon = Icons.Rounded.KeyboardArrowDown,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                    onClick = {
+                        clickHaptic(view)
+                        scope.launch { logScrollState.animateScrollTo(logScrollState.maxValue) }
+                    },
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun LogFloatingButton(
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = modifier.size(32.dp),
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 2.dp,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -4972,16 +5046,26 @@ private fun SettingsPage(
 
     if (showPayloadModeDialog) {
         SideChoiceMenu(
-            // Online first, because it is the default and the one that follows the configured sources.
             choices = listOf(
                 stringResource(R.string.settings_payload_mode_online),
                 stringResource(R.string.settings_payload_mode_offline),
+                stringResource(R.string.settings_payload_mode_local),
             ),
-            selectedIndex = if (payloadMode == PayloadMode.Offline) 1 else 0,
+            selectedIndex = when (payloadMode) {
+                PayloadMode.Online -> 0
+                PayloadMode.Offline -> 1
+                PayloadMode.Local -> 2
+            },
             topOffset = payloadModeMenuTop,
             onSelected = { index ->
                 showPayloadModeDialog = false
-                onPayloadModeChanged(if (index == 1) PayloadMode.Offline else PayloadMode.Online)
+                onPayloadModeChanged(
+                    when (index) {
+                        1 -> PayloadMode.Offline
+                        2 -> PayloadMode.Local
+                        else -> PayloadMode.Online
+                    },
+                )
             },
             onDismiss = { showPayloadModeDialog = false },
         )
@@ -5422,17 +5506,17 @@ private fun SettingsPage(
                     icon = Icons.Rounded.Cloud,
                     title = stringResource(R.string.settings_payload_mode),
                     description = stringResource(
-                        if (payloadMode == PayloadMode.Offline) {
-                            R.string.settings_payload_mode_summary_offline
-                        } else {
-                            R.string.settings_payload_mode_summary_online
+                        when (payloadMode) {
+                            PayloadMode.Offline -> R.string.settings_payload_mode_summary_offline
+                            PayloadMode.Local -> R.string.settings_payload_mode_summary_local
+                            else -> R.string.settings_payload_mode_summary_online
                         },
                     ),
                     value = stringResource(
-                        if (payloadMode == PayloadMode.Offline) {
-                            R.string.settings_payload_mode_offline
-                        } else {
-                            R.string.settings_payload_mode_online
+                        when (payloadMode) {
+                            PayloadMode.Offline -> R.string.settings_payload_mode_offline
+                            PayloadMode.Local -> R.string.settings_payload_mode_local
+                            else -> R.string.settings_payload_mode_online
                         },
                     ),
                     position = SettingsCardPosition.Top,
@@ -6185,9 +6269,23 @@ private fun SettingsPage(
                         onUniversalBootRootChanged(enabled)
                     },
                 )
-                // Follows the load decision for the same reason root on boot does: what it applies its
-                // modules to is the KernelSU a run loaded, and with loading off there is nothing to
-                // apply. It is not tied to root on boot - a manual run can load KernelSU with that off.
+                // Boot payload source: which payload to use for automatic installs at boot.
+                var bootPayloadSource by remember { mutableStateOf(AppPreferences.bootPayloadSource(context)) }
+                var showBootPayloadMenu by remember { mutableStateOf(false) }
+                var bootPayloadMenuTop by remember { mutableStateOf(32.dp) }
+                BootPayloadSourceCard(
+                    view = view,
+                    source = bootPayloadSource,
+                    onSourceChanged = { source ->
+                        bootPayloadSource = source
+                        AppPreferences.setBootPayloadSource(context, source)
+                    },
+                    showMenu = showBootPayloadMenu,
+                    onShowMenu = { showBootPayloadMenu = true },
+                    onDismissMenu = { showBootPayloadMenu = false },
+                    menuTopOffset = bootPayloadMenuTop,
+                    onPositioned = { bootPayloadMenuTop = it },
+                )
                 SettingsSwitchCard(
                     icon = Icons.Rounded.RestartAlt,
                     title = stringResource(R.string.settings_restart_after_root),
@@ -6200,6 +6298,44 @@ private fun SettingsPage(
                         onRestartAfterRootChanged(enabled)
                     },
                 )
+                var rebootOnFailure by remember { mutableStateOf(AppPreferences.rebootOnFailure(context)) }
+                SettingsSwitchCard(
+                    icon = Icons.Rounded.RestartAlt,
+                    title = stringResource(R.string.settings_reboot_on_failure),
+                    description = stringResource(R.string.settings_reboot_on_failure_summary),
+                    checked = rebootOnFailure,
+                    position = SettingsCardPosition.Middle,
+                    onCheckedChange = { enabled ->
+                        clickHaptic(view)
+                        rebootOnFailure = enabled
+                        AppPreferences.setRebootOnFailure(context, enabled)
+                    },
+                )
+                if (rebootOnFailure) {
+                    var maxRetries by remember {
+                        mutableStateOf(AppPreferences.rebootFailureMaxRetries(context))
+                    }
+                    SettingsCard(
+                        icon = Icons.Rounded.Autorenew,
+                        title = stringResource(R.string.settings_reboot_failure_max_retries),
+                        description = stringResource(R.string.settings_reboot_failure_max_retries_summary),
+                        value = if (maxRetries == 0) "∞" else maxRetries.toString(),
+                        position = SettingsCardPosition.Middle,
+                        onClick = {
+                            clickHaptic(view)
+                            val next = when (maxRetries) {
+                                0 -> 1
+                                1 -> 3
+                                3 -> 5
+                                5 -> 10
+                                10 -> 0
+                                else -> 3
+                            }
+                            maxRetries = next
+                            AppPreferences.setRebootFailureMaxRetries(context, next)
+                        },
+                    )
+                }
                 // The one record an install can leave behind that is not a setting at all: a system-uid
                 // APK accepted by Package Manager. It is a one-off action with its own screen, which is
                 // why it sits here rather than anywhere a run reads its configuration from.
@@ -7446,7 +7582,15 @@ private fun TargetSelectionSheet(
             susfsCoverage = susfsCoverage,
         )
     }
-    val selected = rows.all.firstOrNull { it.key == selectedKey }
+    val localName = LocalPayload.displayName(context)
+    val localChoice = if (localName != null) {
+        PayloadChoice.Local(localName, AppPreferences.kernelsuFlavor(context))
+    } else null
+    val selected: PayloadChoice? = if (selectedKey == "local:imported") {
+        localChoice
+    } else {
+        rows.all.firstOrNull { it.key == selectedKey }
+    }
 
     // Preselect what the catalog prefers, so a device whose feed lists an exact kernel release
     // starts on that profile instead of an arbitrary three-part sibling. Only fills an empty
@@ -7697,6 +7841,43 @@ private fun TargetSelectionSheet(
                                     selectedKey = choice.key
                                 },
                             )
+                        }
+                    }
+                }
+
+                if (localChoice != null) {
+                    item(key = "local:imported") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = selectedKey == localChoice.key,
+                                    role = Role.RadioButton,
+                                    onClick = {
+                                        clickHaptic(view)
+                                        selectedKey = localChoice.key
+                                    },
+                                )
+                                .padding(vertical = 12.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            RadioButton(
+                                selected = selectedKey == localChoice.key,
+                                onClick = null,
+                            )
+                            Column {
+                                Text(
+                                    stringResource(R.string.local_payload),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    localChoice.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -8130,10 +8311,10 @@ private fun RunPlanDialog(
                 RunPlanRow(
                     stringResource(R.string.run_plan_payload_mode),
                     stringResource(
-                        if (display.payloadMode == PayloadMode.Offline) {
-                            R.string.settings_payload_mode_offline
-                        } else {
-                            R.string.settings_payload_mode_online
+                        when (display.payloadMode) {
+                            PayloadMode.Offline -> R.string.settings_payload_mode_offline
+                            PayloadMode.Local -> R.string.settings_payload_mode_local
+                            else -> R.string.settings_payload_mode_online
                         },
                     ),
                 )
@@ -9021,9 +9202,6 @@ private fun PayloadSourcesEditor(
                     AppAction(
                         label = R.string.action_save,
                         role = AppActionRole.Priority,
-                        // Nothing to save until something is enabled: a list with every source off is a
-                        // list the app could not read a payload from.
-                        enabled = enabledCount > 0,
                     ) {
                         clickHaptic(view)
                         onSave(sources)
@@ -10807,4 +10985,72 @@ private fun themeModeLabel(themeMode: AppThemeMode): String = when (themeMode) {
     AppThemeMode.System -> stringResource(R.string.theme_system)
     AppThemeMode.Light -> stringResource(R.string.theme_light)
     AppThemeMode.Dark -> stringResource(R.string.theme_dark)
+}
+
+@Composable
+private fun BootPayloadSourceCard(
+    view: View,
+    source: BootPayloadSource,
+    onSourceChanged: (BootPayloadSource) -> Unit,
+    showMenu: Boolean,
+    onShowMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    menuTopOffset: Dp,
+    onPositioned: (Dp) -> Unit,
+) {
+    val density = LocalDensity.current
+    val description = stringResource(
+        when (source) {
+            BootPayloadSource.Cached -> R.string.settings_boot_payload_summary_cached
+            BootPayloadSource.Local -> R.string.settings_boot_payload_summary_local
+            BootPayloadSource.Auto -> R.string.settings_boot_payload_summary_auto
+        },
+    )
+    val value = stringResource(
+        when (source) {
+            BootPayloadSource.Cached -> R.string.settings_boot_payload_cached
+            BootPayloadSource.Local -> R.string.settings_boot_payload_local
+            BootPayloadSource.Auto -> R.string.settings_boot_payload_auto
+        },
+    )
+    SettingsCard(
+        modifier = Modifier.onGloballyPositioned { coordinates ->
+            onPositioned(with(density) { coordinates.positionInWindow().y.toDp() })
+        },
+        icon = Icons.Rounded.Folder,
+        title = stringResource(R.string.settings_boot_payload_source),
+        description = description,
+        value = value,
+        position = SettingsCardPosition.Middle,
+        onClick = {
+            clickHaptic(view)
+            onShowMenu()
+        },
+    )
+    if (showMenu) {
+        SideChoiceMenu(
+            choices = listOf(
+                stringResource(R.string.settings_boot_payload_cached),
+                stringResource(R.string.settings_boot_payload_local),
+                stringResource(R.string.settings_boot_payload_auto),
+            ),
+            selectedIndex = when (source) {
+                BootPayloadSource.Cached -> 0
+                BootPayloadSource.Local -> 1
+                BootPayloadSource.Auto -> 2
+            },
+            topOffset = menuTopOffset,
+            onSelected = { index ->
+                onDismissMenu()
+                onSourceChanged(
+                    when (index) {
+                        1 -> BootPayloadSource.Local
+                        2 -> BootPayloadSource.Auto
+                        else -> BootPayloadSource.Cached
+                    },
+                )
+            },
+            onDismiss = onDismissMenu,
+        )
+    }
 }

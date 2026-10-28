@@ -191,4 +191,5 @@
         <item quantity="other">這些執行紀錄及其日誌將被永久刪除。</item>
     </plurals>
     <string name="history_delete">刪除</string>
+    <string name="nav_automate">Automate</string>
 </resources>

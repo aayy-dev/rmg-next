@@ -171,4 +171,5 @@
         <item quantity="other">Bu kayıtlar ve günlükleri kalıcı olarak silinecek.</item>
     </plurals>
     <string name="history_delete">Sil</string>
+    <string name="nav_automate">Automate</string>
 </resources>

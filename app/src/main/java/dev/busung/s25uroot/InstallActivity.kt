@@ -41,6 +41,8 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.FactCheck
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -87,6 +89,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.busung.s25uroot.ui.theme.RootMyGalaxyTheme
+import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -115,14 +118,32 @@ class InstallActivity : ComponentActivity() {
         intent.removeExtra(EXTRA_UNIVERSAL)
         intent.removeExtra(EXTRA_UNIVERSAL_FLAVOR)
         intent.removeExtra(EXTRA_UNIVERSAL_TIER)
+        // Payload source extras for intent-based launching.
+        val payloadSource = intent.getStringExtra(EXTRA_PAYLOAD_SOURCE)
+        val localPayloadPath = intent.getStringExtra(EXTRA_LOCAL_PAYLOAD_PATH)
+        val fallbackSource = intent.getStringExtra(EXTRA_FALLBACK_SOURCE)
+        intent.removeExtra(EXTRA_PAYLOAD_SOURCE)
+        intent.removeExtra(EXTRA_LOCAL_PAYLOAD_PATH)
+        intent.removeExtra(EXTRA_FALLBACK_SOURCE)
         // Taken off the intent for the same reason the install request is, and read once: a tap on a run
         // notification names the run it was about, and what this screen can do with that name does not
         // change while it is open.
         val openedRunId = intent.getStringExtra(EXTRA_RUN_ID)
         intent.removeExtra(EXTRA_RUN_ID)
+        // Auto-generate a request ID for external intent launches so callers don't need to supply one.
+        val externalLaunch = savedInstanceState == null &&
+            intent.action == ACTION_INSTALL &&
+            intent.getStringExtra(EXTRA_INSTALL_REQUEST_ID) == null
+        val requestId = if (externalLaunch) {
+            UUID.randomUUID().toString().also {
+                intent.putExtra(EXTRA_INSTALL_REQUEST_ID, it)
+            }
+        } else {
+            intent.getStringExtra(EXTRA_INSTALL_REQUEST_ID)
+        }
         val startInstall = savedInstanceState == null && AppPreferences.consumeInstallRequest(
             this,
-            intent.getStringExtra(EXTRA_INSTALL_REQUEST_ID),
+            requestId,
         )
         intent.removeExtra(EXTRA_INSTALL_REQUEST_ID)
         // Taken off the intent for the same reason the install request is: an answer that stayed there
@@ -149,6 +170,7 @@ class InstallActivity : ComponentActivity() {
                 // answer with an install screen: a fresh one would offer to start a second run while the
                 // notification was describing the first. Held so the frames before the record has been read
                 // are a wait rather than that screen.
+                val isGatePending = RunInFlight.isGatePending(openedRunId)
                 val handedOverRun = openedRunId != null && openedRunId != installViewModel.activeRunId
                 // Back is only held for a run in this process, where leaving would take the screen away with
                 // the run still on it. Leaving a followed run costs nothing: the run is elsewhere, and this
@@ -161,20 +183,57 @@ class InstallActivity : ComponentActivity() {
                 LaunchedEffect(openedRunId, installViewModel.activeRunId) {
                     if (!handedOverRun) return@LaunchedEffect
                     val wanted = openedRunId ?: return@LaunchedEffect
-                    // Re-read while it is live. The run screen's own state cannot be reached from here, so the
-                    // entry is what this screen draws: the same bar, the same steps, and the log as it arrives.
-                    while (true) {
-                        val run = followedRun(
-                            entry = InstallHistoryStore(this@InstallActivity).entry(wanted),
-                            holder = RunInFlight.holder(this@InstallActivity),
-                        )
-                        if (run == null) break
-                        followed = run
-                        delay(FOLLOW_TICK_MILLIS)
+                    if (isGatePending) {
+                        // Gate-pending: the boot gate registered but hasn't started the real run yet.
+                        // Poll until the holder's entry ID changes to a real one, then follow that.
+                        var realEntryId: String? = null
+                        while (realEntryId == null) {
+                            val holder = RunInFlight.holder(this@InstallActivity)
+                            if (holder == null) {
+                                // Gate ended without starting a run — go home.
+                                startActivity(runRecordIntent(this@InstallActivity, null))
+                                finish()
+                                return@LaunchedEffect
+                            }
+                            if (!RunInFlight.isGatePending(holder.entryId)) {
+                                realEntryId = holder.entryId
+                            } else {
+                                delay(FOLLOW_TICK_MILLIS)
+                            }
+                        }
+                        // Now follow the real run entry. The entry might not be on disk
+                        // yet right after begin() writes the ID, so retry while the holder
+                        // says a run is still in flight.
+                        while (true) {
+                            val holder = RunInFlight.holder(this@InstallActivity)
+                            val entry = InstallHistoryStore(this@InstallActivity).entry(realEntryId!!)
+                            val run = followedRun(entry = entry, holder = holder)
+                            if (run != null) {
+                                followed = run
+                            } else if (holder != null && holder.entryId == realEntryId) {
+                                delay(FOLLOW_TICK_MILLIS)
+                                continue
+                            } else {
+                                break
+                            }
+                            delay(FOLLOW_TICK_MILLIS)
+                        }
+                        startActivity(runRecordIntent(this@InstallActivity, realEntryId))
+                        finish()
+                    } else {
+                        // Normal follow mode: re-read while it is live.
+                        while (true) {
+                            val run = followedRun(
+                                entry = InstallHistoryStore(this@InstallActivity).entry(wanted),
+                                holder = RunInFlight.holder(this@InstallActivity),
+                            )
+                            if (run == null) break
+                            followed = run
+                            delay(FOLLOW_TICK_MILLIS)
+                        }
+                        startActivity(runRecordIntent(this@InstallActivity, wanted))
+                        finish()
                     }
-                    // Finished, gone, or never live: the record is where an outcome belongs.
-                    startActivity(runRecordIntent(this@InstallActivity, wanted))
-                    finish()
                 }
                 LaunchedEffect(startInstall, universal, universalFlavor, universalTier, selectionId, answer) {
                     when {
@@ -184,7 +243,12 @@ class InstallActivity : ComponentActivity() {
                                 ?: AppPreferences.kernelsuFlavor(this@InstallActivity),
                             universalTier,
                         )
-                        startInstall -> installViewModel.install(selectionId)
+                        startInstall -> installViewModel.install(
+                            selectionId = selectionId,
+                            payloadSource = payloadSource,
+                            localPayloadPath = localPayloadPath,
+                            fallbackSource = fallbackSource,
+                        )
                     }
                 }
                 // Asked over the run screen, because the run is what the answer is about: starting
@@ -198,15 +262,62 @@ class InstallActivity : ComponentActivity() {
                 )
                 val running = followed
                 if (handedOverRun && running == null) {
-                    // The wait before the first read lands, and the last frame before the record takes over.
-                    // A spinner rather than the install screen, which would be offering a run of its own
-                    // beside the one the notification was about.
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        LoadingIndicator(modifier = Modifier.size(32.dp))
+                    if (isGatePending) {
+                        var settleLeft by remember { mutableStateOf(-1L) }
+                        val settleTotal = remember {
+                            AppPreferences.bootGateSettleSeconds(this@InstallActivity) * 1000L
+                        }
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                val left = BootSettle.remainingMillis(
+                                    AppPreferences.bootGateSettleSeconds(this@InstallActivity),
+                                    BootSettle.elapsedMillis(),
+                                )
+                                settleLeft = left
+                                if (left <= 0L) break
+                                delay(500L)
+                            }
+                        }
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp),
+                                modifier = Modifier.padding(32.dp),
+                            ) {
+                                LoadingIndicator(modifier = Modifier.size(32.dp))
+                                Text(
+                                    text = if (settleLeft > 0L) {
+                                        stringResource(R.string.autoroot_stabilizing)
+                                    } else {
+                                        stringResource(R.string.autoroot_starting)
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                if (settleLeft > 0L && settleTotal > 0L) {
+                                    LinearProgressIndicator(
+                                        progress = { 1f - settleLeft.toFloat() / settleTotal },
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.6f)
+                                            .padding(top = 8.dp),
+                                    )
+                                    Text(
+                                        text = BootSettle.formatRemaining(settleLeft),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // The wait before the first read lands, and the last frame before the record
+                        // takes over. A spinner rather than the install screen.
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            LoadingIndicator(modifier = Modifier.size(32.dp))
+                        }
                     }
                 } else {
                     InstallScreen(
-                        installState = running?.state() ?: installState,
+                        installState = running?.state(this@InstallActivity) ?: installState,
                         followed = running != null,
                         // The bar's in-boot answers end here, and they repeat the run *as the flow it was*:
                         // this used to call `install`, which is the payload flow, so a universal run's retry
@@ -321,6 +432,12 @@ class InstallActivity : ComponentActivity() {
 
         /** Which payload it stages, by [PayloadTier.name]: the card's second answer. */
         const val EXTRA_UNIVERSAL_TIER = "universal_root_tier"
+
+        const val EXTRA_PAYLOAD_SOURCE = "payload_source"
+        const val EXTRA_LOCAL_PAYLOAD_PATH = "local_payload_path"
+        const val EXTRA_FALLBACK_SOURCE = "fallback_source"
+
+        const val ACTION_INSTALL = "dev.aayy.rmg.action.INSTALL"
     }
 }
 
@@ -394,8 +511,6 @@ private fun InstallScreen(
     onOpenSetting: (String) -> Unit,
 ) {
     val logScrollState = rememberScrollState()
-    // The page's own scroll, held out here so the button over it can drive the same state.
-    val pageScrollState = rememberScrollState()
     val view = LocalView.current
     var showRetryChoice by remember { mutableStateOf(false) }
     // For the bar's one answer that is not instantaneous: arming a retry for the next boot writes a preference
@@ -444,273 +559,154 @@ private fun InstallScreen(
         logScrollState.scrollTo(logScrollState.maxValue)
     }
 
-    // The page scrolls, and the log panel has a height of its own rather than a share of what is left.
-    // It used to be the weighted remainder, which is fine until the failure card grows: a run that died
-    // in the exploit left the log a title, a copy button and no text at all, because the card above had
-    // already taken the height the log was supposed to live in. A log that can vanish is worse than a
-    // page that has to be scrolled - and the log is the only continuous account of a run.
     Scaffold { padding ->
-        PageColumn(
-            padding = padding,
-            scrollState = pageScrollState,
-            modifier = Modifier.padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            // The run's own controls, in a bar over the page rather than at the end of it. The page measured
-            // them so that the back-to-top button could yield to them, and the log - the one continuous
-            // account of a run - was what ended up in the space between. A bar over the page has neither
-            // problem: the button stands above it, and the log has the screen.
-            //
-            // Empty in the one phase that offers nothing - the screen open before a run has started - where
-            // the bar measures zero and the page ends where it would have.
-            bar = {
-                if (runControlsOffered(installState.phase, installState.busy)) {
-                    RunActionBar {
-                        // The wait can be cut short while the app is holding the run: the wait is a floor and
-                        // not a rule, and the user is the one who knows whether this boot has settled. Not
-                        // for a followed run: that flag is in the process running it, and a button that
-                        // cannot reach it is worse than no button.
-                        if (installState.phase == InstallPhase.Settling && !followed) {
-                            AppActionButton(
-                                AppAction(
-                                    label = R.string.action_run_now,
-                                    // The recommendation of the pair while the wait runs: cutting it short
-                                    // is what someone who came back to this screen wants, and the one
-                                    // answer beside it is the way out.
-                                    role = AppActionRole.Priority,
-                                ) {
-                                    clickHaptic(view)
-                                    onSkipBootSettle()
-                                },
-                                Modifier.weight(1f),
-                            )
-                        }
-                        // Offered for the whole run rather than only while it is busy elsewhere: it is the one
-                        // way out of a run that has hung, since back is disabled for the length of one and
-                        // nothing else on the screen can be pressed.
-                        if (installState.busy) {
-                            AppActionButton(
-                                AppAction(
-                                    label = R.string.action_stop_run,
-                                    // The error colours, because stopping takes the run away - which is the
-                                    // one thing a role here says about what an answer does rather than how
-                                    // much the screen wants it. For most of a run this is the only control
-                                    // in the bar, so there is nothing for it to be the loud one against:
-                                    // filled primary would read as "carry on", which is the opposite of it.
-                                    role = AppActionRole.Destructive,
-                                ) {
-                                    clickHaptic(view)
-                                    onStop()
-                                },
-                                Modifier.weight(1f),
-                            )
-                        }
-                        if (!installState.busy) {
-                            val waiting = waitRemaining
-                            when {
-                                // The countdown and its two answers in the bar itself, because that is where
-                                // the answers are: as a card it was a second surface inside this one.
-                                //
-                                // All three carry the same weight, which is the rule every other row in this
-                                // bar already followed - and the only row that did not. The two answers used to
-                                // wrap their own labels while the sentence beside them took what was left, so
-                                // the row read as one message with two footnotes instead of three things each
-                                // given a third of it. A label wraps to two lines rather than eliding, so the
-                                // ones that are tight here - "Stop waiting" is the longest - stay readable.
-                                waiting != null -> {
-                                    Text(
-                                        text = stringResource(R.string.retry_waiting_body, waiting),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    AppActionButton(
-                                        AppAction(R.string.retry_waiting_cancel) {
-                                            clickHaptic(view)
-                                            waitRemaining = null
-                                        },
-                                        Modifier.weight(1f),
-                                    )
-                                    AppActionButton(
-                                        AppAction(
-                                            label = R.string.retry_waiting_start,
-                                            role = AppActionRole.Priority,
-                                        ) {
-                                            clickHaptic(view)
-                                            waitRemaining = null
-                                            onRetry()
-                                        },
-                                        Modifier.weight(1f),
-                                    )
-                                }
-                                installState.phase == InstallPhase.Failed ||
-                                    installState.phase == InstallPhase.Stopped -> {
-                                    // A universal run gets Close and nothing else, and it is the loud answer for
-                                    // it because it is the only one. The retry beside it belongs to the payload
-                                    // flow: its answers are "retry in this boot", which *runs the payload
-                                    // install*, and "reboot and retry", which arms one for the boot gate. A
-                                    // failure of the universal root offering those is one flow's control
-                                    // starting the other flow's run - which is what it did.
-                                    //
-                                    // It is also a retry that cannot work here. The chain arms a marker only a
-                                    // reboot clears, and the run refuses itself while that marker is up, so a
-                                    // retry offered in this boot would be pressed and then refused.
-                                    val universalRun = installState.kind == RunKind.Universal
-                                    AppActionButton(
-                                        AppAction(R.string.action_close) {
-                                            clickHaptic(view)
-                                            onClose()
-                                        },
-                                        Modifier.weight(1f),
-                                    )
-                                    if (universalRun) {
-                                        // This flow's own retry, and it works where the payload flow's would
-                                        // not: a restart clears the marker the chain arms only for a reboot to
-                                        // clear, and the boot gate then runs the plan the failed run recorded -
-                                        // the same KernelSU and the same payload tier, from the same settings.
-                                        //
-                                        // What is *not* reported here is whether the restart was taken: the
-                                        // arming is what matters and it has already happened by the time this
-                                        // returns, and the run's own log is where the two are told apart.
-                                        AppActionButton(
-                                            AppAction(
-                                                label = R.string.retry_after_reboot,
-                                                role = AppActionRole.Priority,
-                                            ) {
-                                                clickHaptic(view)
-                                                scope.launch { onRebootAndRetryUniversal() }
-                                            },
-                                            Modifier.weight(1f),
-                                        )
-                                    } else {
-                                        AppActionButton(
-                                            AppAction(
-                                                label = R.string.action_retry,
-                                                role = AppActionRole.Priority,
-                                            ) {
-                                                clickHaptic(view)
-                                                showRetryChoice = true
-                                            },
-                                            Modifier.weight(1f),
-                                        )
-                                    }
-                                }
-                                else -> {
-                                    // The step after a successful load, and the reason it is here rather than
-                                    // only in Settings: KernelSU has just been loaded into the running kernel,
-                                    // and the modules that go with it are mounted but not yet in a Zygote. A
-                                    // userspace restart is what puts them there, and asking for it from the
-                                    // screen that just finished is the moment the user is thinking about it.
-                                    if (installState.phase == InstallPhase.Installed) {
-                                        // A root this run reported without being able to read it: the manager is
-                                        // where it can be seen, so opening the one for the flavour that was
-                                        // loaded is the loud answer of this row. The restart beside it is still
-                                        // offered and is still what puts the freshly mounted modules into a
-                                        // Zygote, but a person who has not seen the root yet needs the place it
-                                        // can be seen first - and there is one Priority per row, so the restart
-                                        // steps down only when this is here.
-                                        val manager = installState.unverifiedRootManager
-                                        if (manager != null) {
-                                            val context = LocalContext.current
-                                            AppActionButton(
-                                                AppAction(
-                                                    label = R.string.action_open_manager,
-                                                    role = AppActionRole.Priority,
-                                                ) {
-                                                    clickHaptic(view)
-                                                    KernelSuManager.open(context, manager) { }
-                                                },
-                                                Modifier.weight(1f),
-                                            )
-                                        }
-                                        RecoveryActionButton(
-                                            tool = RecoveryTool.SoftReboot,
-                                            // The label, not the sentence: the answer button resolves its
-                                            // own label, so every answer in the app is one resource.
-                                            label = R.string.install_load_modules,
-                                            // The loud one, which no other use of this button is: the row has
-                                            // two answers and this is the one that finishes what the run
-                                            // started. The restart is what puts the freshly mounted modules
-                                            // into a Zygote, while the answer beside it only leaves the screen -
-                                            // so leaving both quiet made the row two equally optional things
-                                            // and the step that completes the job indistinguishable from the
-                                            // way out.
-                                            role = if (manager == null) {
-                                                AppActionRole.Priority
-                                            } else {
-                                                AppActionRole.Standard
-                                            },
-                                            modifier = Modifier.weight(1f),
-                                            onOpenSetting = onOpenSetting,
-                                        )
-                                    }
-                                    // Quiet rather than filled: the restart beside it is the step that finishes
-                                    // a load, and this is only the way out of the screen.
-                                    AppActionButton(
-                                        AppAction(R.string.action_done) {
-                                            clickHaptic(view)
-                                            onClose()
-                                        },
-                                        // Weighted like its neighbour, so the two share the bar evenly.
-                                        // Unweighted it wrapped its own four-letter label, which drew a
-                                        // footnote-sized pill beside a full-width restart and read as though one
-                                        // of the two answers mattered less than the other - the opposite of
-                                        // what the fills now say.
-                                        Modifier.weight(1f),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp)
+                .padding(top = 12.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(top = 28.dp, bottom = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    text = stringResource(R.string.install_title),
-                    style = MaterialTheme.typography.headlineLarge,
-                )
-                Text(
-                    text = when {
-                        // A followed run is not held open by this screen - it is held by the process
-                        // running it - so the line under the title is the run's own last word instead.
-                        followed -> installState.message
-                        installState.busy -> stringResource(R.string.install_keep_open)
-                        else -> installState.message
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
             InstallerStatusCard(installState, onOpenReadOnlySetting = { onOpenSetting(SettingsTarget.PartitionReadOnly) })
-            InstallerSteps(
-                phase = installState.phase,
-                failure = installState.failure,
-                stoppedAt = installState.stoppedAt,
-                kind = installState.kind,
-            )
             InstallerLog(
                 output = installState.log,
                 showJumpToEnd = follow.jumpOffered,
                 onJumpToEnd = {
                     clickHaptic(view)
                     follow = LogFollow.Start
-                    // A counter rather than a scroll here: the effect that already owns this state does the
-                    // scrolling, and a second path to the same scroll is how two of them come to disagree.
                     jumpRequests++
                 },
-                // A height of its own, because this panel is the only continuous account of a run: as a
-                // weighted remainder it collapsed to nothing the moment a failure card had something to
-                // say. The status card is still capped, so the two together are a page rather than a
-                // report of arbitrary length - and the controls no longer sit below this at all, which is
-                // what the bar is for.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(LOG_PANEL_HEIGHT),
+                    .weight(1f),
                 scrollState = logScrollState,
             )
+            if (runControlsOffered(installState.phase, installState.busy)) {
+                RunActionBar {
+                    if (installState.phase == InstallPhase.Settling && !followed) {
+                        AppActionButton(
+                            AppAction(
+                                label = R.string.action_run_now,
+                                role = AppActionRole.Priority,
+                            ) {
+                                clickHaptic(view)
+                                onSkipBootSettle()
+                            },
+                            Modifier.weight(1f),
+                        )
+                    }
+                    if (installState.busy) {
+                        AppActionButton(
+                            AppAction(
+                                label = R.string.action_stop_run,
+                                role = AppActionRole.Destructive,
+                            ) {
+                                clickHaptic(view)
+                                onStop()
+                            },
+                            Modifier.weight(1f),
+                        )
+                    }
+                    if (!installState.busy) {
+                        val waiting = waitRemaining
+                        when {
+                            waiting != null -> {
+                                Text(
+                                    text = stringResource(R.string.retry_waiting_body, waiting),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                AppActionButton(
+                                    AppAction(R.string.retry_waiting_cancel) {
+                                        clickHaptic(view)
+                                        waitRemaining = null
+                                    },
+                                    Modifier.weight(1f),
+                                )
+                                AppActionButton(
+                                    AppAction(
+                                        label = R.string.retry_waiting_start,
+                                        role = AppActionRole.Priority,
+                                    ) {
+                                        clickHaptic(view)
+                                        waitRemaining = null
+                                        onRetry()
+                                    },
+                                    Modifier.weight(1f),
+                                )
+                            }
+                            installState.phase == InstallPhase.Failed ||
+                                installState.phase == InstallPhase.Stopped -> {
+                                val universalRun = installState.kind == RunKind.Universal
+                                AppActionButton(
+                                    AppAction(R.string.action_close) {
+                                        clickHaptic(view)
+                                        onClose()
+                                    },
+                                    Modifier.weight(1f),
+                                )
+                                if (universalRun) {
+                                    AppActionButton(
+                                        AppAction(
+                                            label = R.string.retry_after_reboot,
+                                            role = AppActionRole.Priority,
+                                        ) {
+                                            clickHaptic(view)
+                                            scope.launch { onRebootAndRetryUniversal() }
+                                        },
+                                        Modifier.weight(1f),
+                                    )
+                                } else {
+                                    AppActionButton(
+                                        AppAction(
+                                            label = R.string.action_retry,
+                                            role = AppActionRole.Priority,
+                                        ) {
+                                            clickHaptic(view)
+                                            showRetryChoice = true
+                                        },
+                                        Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                            else -> {
+                                if (installState.phase == InstallPhase.Installed) {
+                                    val manager = installState.unverifiedRootManager
+                                    if (manager != null) {
+                                        val context = LocalContext.current
+                                        AppActionButton(
+                                            AppAction(
+                                                label = R.string.action_open_manager,
+                                                role = AppActionRole.Priority,
+                                            ) {
+                                                clickHaptic(view)
+                                                KernelSuManager.open(context, manager) { }
+                                            },
+                                            Modifier.weight(1f),
+                                        )
+                                    }
+                                    RecoveryActionButton(
+                                        tool = RecoveryTool.SoftReboot,
+                                        label = R.string.install_load_modules,
+                                        role = if (manager == null) AppActionRole.Priority else AppActionRole.Standard,
+                                        modifier = Modifier.weight(1f),
+                                        onOpenSetting = onOpenSetting,
+                                    )
+                                }
+                                AppActionButton(
+                                    AppAction(R.string.action_done) {
+                                        clickHaptic(view)
+                                        onClose()
+                                    },
+                                    Modifier.weight(1f),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -975,16 +971,12 @@ internal fun RetryOption(
 @Composable
 private fun InstallerStatusCard(
     installState: InstallUiState,
-    /** Where the notice's own button goes: to the switch that refused the write. */
     onOpenReadOnlySetting: () -> Unit,
 ) {
-    // The same verdict colours Home's card, the history rows and the notification use: a root-only run
-    // used to read as a plain success here and as something else in the list.
     val verdict = verdictColors(runVerdict(installState.phase, installState.busy))
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = STATUS_CARD_MAX_HEIGHT)
             .animateContentSize(),
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
@@ -993,82 +985,113 @@ private fun InstallerStatusCard(
         ),
     ) {
         Column(
-            // Scrollable, because the cap above must clip something: the payload's own lines are the
-            // part that can be any length, and losing the stage or the progress bar off the top of a
-            // failure card would be worse than scrolling to reach the last of them.
-            modifier = Modifier
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 AnimatedContent(targetState = installState.phase, label = "install-status-icon") { phase ->
                     when {
                         installState.busy -> LoadingIndicator(
-                            modifier = Modifier.size(44.dp),
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(32.dp),
+                            color = LocalContentColor.current,
                         )
                         phase == InstallPhase.Installed -> Icon(
                             Icons.Rounded.Check,
                             contentDescription = null,
-                            modifier = Modifier.size(44.dp),
+                            modifier = Modifier.size(32.dp),
                         )
-                        // Root was obtained, so this is not the failure icon: it is the honest
-                        // "root only" reading of a run whose load was switched off.
                         phase == InstallPhase.RootOnly -> Icon(
                             Icons.Rounded.Security,
                             contentDescription = null,
-                            modifier = Modifier.size(44.dp),
+                            modifier = Modifier.size(32.dp),
                         )
                         else -> Icon(
                             Icons.Rounded.Error,
                             contentDescription = null,
-                            modifier = Modifier.size(44.dp),
+                            modifier = Modifier.size(32.dp),
                         )
                     }
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = installState.message,
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    Text(
-                        text = installPhaseDetail(installState),
-                        color = LocalContentColor.current.copy(alpha = 0.78f),
-                        // A cause, not a log: the card must not grow into one no matter what a
-                        // payload or a message turns out to contain.
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Text(
+                    text = installState.message,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
             }
-            installState.failure?.let { failure -> FailureReport(failure) }
-            // The one failure whose fix is a switch in this app: it is named here, beside the failure,
-            // with the way to it - and only when it is this run's own protection that refused the write.
-            // The other fact that changes what comes next: something may still be running. Beside the
-            // failure rather than only in the log, because it is the reason the retry question below
-            // keeps one answer instead of three.
-            installState.failure?.inBootRetryBlocked?.let { block -> InBootRetryNotice(block) }
-            if (installState.failure?.readOnlyWall == true) {
-                ReadOnlyWallNotice(onOpenSetting = onOpenReadOnlySetting)
+            if (installState.runStartedAtMillis > 0L && installState.runTotalLimitMillis > 0L) {
+                RunTimer(
+                    startedAtMillis = installState.runStartedAtMillis,
+                    totalLimitMillis = installState.runTotalLimitMillis,
+                    busy = installState.busy,
+                )
+            } else {
+                LinearProgressIndicator(
+                    progress = {
+                        installProgress(
+                            phase = installState.phase,
+                            failureStage = installState.failure?.stage ?: installState.stoppedAt,
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = LocalContentColor.current,
+                    trackColor = LocalContentColor.current.copy(alpha = 0.2f),
+                    drawStopIndicator = {},
+                )
             }
-            LinearProgressIndicator(
-                progress = {
-                    installProgress(
-                        phase = installState.phase,
-                        failureStage = installState.failure?.stage ?: installState.stoppedAt,
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
-                color = LocalContentColor.current,
-                trackColor = LocalContentColor.current.copy(alpha = 0.2f),
-                drawStopIndicator = {},
-            )
         }
     }
+}
+
+@Composable
+private fun RunTimer(
+    startedAtMillis: Long,
+    totalLimitMillis: Long,
+    busy: Boolean,
+) {
+    var elapsedMillis by remember { mutableStateOf(System.currentTimeMillis() - startedAtMillis) }
+    LaunchedEffect(busy) {
+        if (!busy) return@LaunchedEffect
+        while (true) {
+            elapsedMillis = System.currentTimeMillis() - startedAtMillis
+            delay(1000)
+        }
+    }
+    val elapsedSec = (elapsedMillis / 1000).coerceAtLeast(0)
+    val totalSec = totalLimitMillis / 1000
+    val fraction = if (totalSec > 0) (elapsedSec.toFloat() / totalSec).coerceIn(0f, 1f) else 0f
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = formatTimerSeconds(elapsedSec),
+            style = MaterialTheme.typography.labelLarge,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(
+            text = "/ ${formatTimerSeconds(totalSec)}",
+            style = MaterialTheme.typography.labelMedium,
+            color = LocalContentColor.current.copy(alpha = 0.7f),
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+    LinearProgressIndicator(
+        progress = { fraction },
+        modifier = Modifier.fillMaxWidth(),
+        color = LocalContentColor.current,
+        trackColor = LocalContentColor.current.copy(alpha = 0.2f),
+        drawStopIndicator = {},
+    )
+}
+
+private fun formatTimerSeconds(seconds: Long): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return "$m:${s.toString().padStart(2, '0')}"
 }
 
 @Composable
@@ -1178,91 +1201,76 @@ private fun InstallerLog(
     output: String,
     modifier: Modifier,
     scrollState: androidx.compose.foundation.ScrollState,
-    /** Whether the panel offers the way back to the newest line. */
     showJumpToEnd: Boolean,
     onJumpToEnd: () -> Unit,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
-    // Wrapped, elided and de-ticked on the way to the screen, and nowhere else: the copy button below takes
-    // the raw text, which is what a bug report wants - see [formatLogForDisplay]. Memoised on the log so the
-    // pass runs once per appended line rather than once per frame.
+    val scope = rememberCoroutineScope()
     val display = remember(output) { formatLogForDisplay(output) }
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+        Box(modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = display ?: stringResource(R.string.install_preparing),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+                    .padding(14.dp),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(
-                    stringResource(R.string.install_live_progress),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
+                LogFloatingButton(
+                    icon = Icons.Rounded.KeyboardArrowUp,
+                    onClick = {
+                        clickHaptic(view)
+                        scope.launch { scrollState.animateScrollTo(0) }
+                    },
                 )
-                IconButton(onClick = {
+                LogFloatingButton(
+                    icon = Icons.Rounded.ContentCopy,
+                    onClick = {
+                        clickHaptic(view)
+                        copyLogToClipboard(context, output)
+                    },
+                )
+            }
+            LogFloatingButton(
+                icon = Icons.Rounded.KeyboardArrowDown,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                onClick = {
                     clickHaptic(view)
-                    copyLogToClipboard(context, output)
-                }) {
-                    Icon(
-                        Icons.Rounded.ContentCopy,
-                        contentDescription = stringResource(R.string.action_copy_log),
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-            }
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                Text(
-                    text = display ?: stringResource(R.string.install_preparing),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(scrollState),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                // Over the text rather than beside it: the chip is about the last line, and a row of its own
-                // would shorten every line of a payload's output for the sake of a button. Faded rather than
-                // animated in and out, so it cannot steal a line of the log while it arrives.
-                val chipAlpha by animateFloatAsState(
-                    targetValue = if (showJumpToEnd) 1f else 0f,
-                    label = "jump-to-end",
-                )
-                if (chipAlpha > 0.01f) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.BottomEnd).alpha(chipAlpha),
-                        onClick = onJumpToEnd,
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        tonalElevation = 4.dp,
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            Text(
-                                stringResource(R.string.install_log_jump_to_end),
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                            Icon(
-                                Icons.Rounded.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
-                    }
-                }
-            }
+                    onJumpToEnd()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun LogFloatingButton(
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = modifier.size(32.dp),
+        onClick = onClick,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 2.dp,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -1402,24 +1410,7 @@ private fun FailureReport(failure: RunFailure) {
     }
 }
 
-/**
- * How tall the status card may grow.
- *
- * A failure card carries the stage, the cause, the payload's last lines and a progress bar, and it
- * used to take as much room as its evidence needed - which on a short window left the run log with
- * nothing and the panel collapsed to an empty strip. It scrolls past this instead.
- */
-private val STATUS_CARD_MAX_HEIGHT = 216.dp
 
-/**
- * How tall the run log is, whatever else is on the screen.
- *
- * Fixed rather than a share of what is left, because what is left is exactly what a long failure report
- * takes: the panel was measured at zero text height on a run that died in the exploit, showing its title
- * and its copy button over empty space while the run's actual output sat unread in the state. Roughly a
- * screen third, which is enough for the tail of a payload's output - the part that says why it stopped.
- */
-private val LOG_PANEL_HEIGHT = 280.dp
 
 /**
  * How far the bar has come.

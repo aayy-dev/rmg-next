@@ -31,9 +31,9 @@ internal data class FollowedRun(val entry: InstallHistoryEntry, val holder: RunH
      * The status line is the run's own last line, because the message the run posts is not in the entry: the
      * log is written per line and the message is the thing being written most often.
      */
-    fun state(): InstallUiState = InstallUiState(
+    fun state(context: android.content.Context): InstallUiState = InstallUiState(
         phase = entry.phase ?: InstallPhase.Checking,
-        message = entry.log.lastLogLine(),
+        message = phaseMessage(context, entry.phase),
         log = entry.log,
         // From the record, and this is the half that was missing: this screen did not start the run, so the
         // flow is only knowable if the run wrote it down. Without it a universal run being followed was drawn
@@ -74,5 +74,15 @@ internal const val FOLLOW_TICK_MILLIS = 1_000L
  * The whole line, markers included: it is the payload's own output as often as this app's, and stripping the
  * leading `[*]` would edit the one thing on the screen that is quoted rather than written.
  */
+private fun phaseMessage(context: android.content.Context, phase: InstallPhase?): String = when (phase) {
+    InstallPhase.Checking -> context.getString(R.string.status_checking_github)
+    InstallPhase.Downloading -> context.getString(R.string.status_downloading_payload)
+    InstallPhase.Exploiting -> context.getString(R.string.status_exploit_running)
+    InstallPhase.LoadingKernelSu -> context.getString(R.string.stage_kernel_su)
+    InstallPhase.Installed -> context.getString(R.string.run_chip_rooted)
+    InstallPhase.Failed -> context.getString(R.string.run_chip_failed)
+    else -> context.getString(R.string.status_checking_device)
+}
+
 private fun String.lastLogLine(): String =
     lineSequence().lastOrNull { it.isNotBlank() }?.trim().orEmpty()

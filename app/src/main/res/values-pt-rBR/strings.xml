@@ -176,4 +176,5 @@
         <item quantity="other">Estas execuções e seus logs serão removidos permanentemente.</item>
     </plurals>
     <string name="history_delete">Excluir</string>
+    <string name="nav_automate">Automate</string>
 </resources>

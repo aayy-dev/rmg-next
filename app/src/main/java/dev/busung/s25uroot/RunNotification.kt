@@ -34,7 +34,7 @@ import androidx.core.app.NotificationManagerCompat
  */
 internal object RunNotification {
 
-    private const val CHANNEL_ID = "run"
+    private const val CHANNEL_ID = "run_live"
 
     /**
      * The API that promotes an ongoing notification to a live update.
@@ -254,13 +254,19 @@ internal object RunNotification {
      * is the run's own progress: null for a wait that cannot be measured in one, which is still promoted - a
      * live update may carry no bar at all.
      */
-    internal fun live(builder: NotificationCompat.Builder, chip: String, fraction: Float?) {
+    internal fun live(
+        builder: NotificationCompat.Builder,
+        chip: String,
+        fraction: Float?,
+        countdownEndMillis: Long = 0L,
+    ) {
         val percent = fraction?.let { (it.coerceIn(0f, 1f) * 100).toInt() }
+        if (countdownEndMillis > 0L) {
+            builder.setUsesChronometer(true)
+            builder.setChronometerCountDown(true)
+            builder.setWhen(countdownEndMillis)
+        }
         if (Build.VERSION.SDK_INT >= LIVE_UPDATE_API) {
-            // ProgressStyle and not the builder's own progress, because the style is what the platform reads:
-            // an ongoing notification is only promoted when its style is one of the five it draws, and this
-            // is the one a bar belongs in. It writes the ordinary progress itself from the same value, so
-            // asking for both would be two claims about one bar.
             if (percent != null) {
                 builder.setStyle(NotificationCompat.ProgressStyle().setProgress(percent))
             }
@@ -268,7 +274,6 @@ internal object RunNotification {
             builder.setRequestPromotedOngoing(true)
             return
         }
-        // No live update on this phone, so the same bar in the ordinary notification.
         if (percent != null) builder.setProgress(100, percent, false)
     }
 
@@ -313,9 +318,10 @@ internal object RunNotification {
                 NotificationChannel(
                     CHANNEL_ID,
                     context.getString(R.string.run_notification_channel_name),
-                    NotificationManager.IMPORTANCE_LOW,
+                    NotificationManager.IMPORTANCE_DEFAULT,
                 ).apply {
                     description = context.getString(R.string.run_notification_channel_description)
+                    setSound(null, null)
                 },
             )
         }

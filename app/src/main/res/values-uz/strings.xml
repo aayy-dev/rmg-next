@@ -182,4 +182,5 @@
         <item quantity="other">Bu jarayonlar va ularning jurnallari butunlay o\'chiriladi.</item>
     </plurals>
     <string name="history_delete">O\'chirish</string>
+    <string name="nav_automate">Automate</string>
 </resources>
