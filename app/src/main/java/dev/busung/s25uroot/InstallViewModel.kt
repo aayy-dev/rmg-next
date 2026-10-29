@@ -2996,9 +2996,9 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
         private const val ATTEMPTS_ENV = "EXPLOIT_ATTEMPTS"
         private const val P0_TIMEOUT_ENV = "P0_ATTEMPT_TIMEOUT_SEC"
         private const val ATTEMPT_TIMEOUT_ENV = "EXPLOIT_ATTEMPT_TIMEOUT_SEC"
-        private const val EXPLOIT_ATTEMPTS = "24"
-        private const val P0_ATTEMPT_TIMEOUT_SEC = "600"
-        private const val EXPLOIT_ATTEMPT_TIMEOUT_SEC = "900"
+        private const val EXPLOIT_ATTEMPTS = "1"
+        private const val P0_ATTEMPT_TIMEOUT_SEC = "2400"
+        private const val EXPLOIT_ATTEMPT_TIMEOUT_SEC = "2200"
         internal const val P0_OFFSET_ENV = "SLIDE_P0_OFFSET"
 
         /**
